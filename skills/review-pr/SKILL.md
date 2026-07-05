@@ -1,5 +1,5 @@
 ---
-name: pr-review
+name: review-pr
 description: Review an open GitHub Pull Request, analyze changes against relevant .github/instructions, and post structured review comments directly on the PR.
 ---
 
@@ -12,8 +12,8 @@ Review a specific GitHub Pull Request by fetching its diff, analyzing it against
 
 This skill runs in **two possible modes**. Detect the mode before doing anything else:
 
-- **CI mode**: the environment variable `CI` is set to `true` (this is the case in the GitHub Actions pipeline that invokes this skill via `claude --print`).
-- **Interactive mode**: `CI` is not set (a human is chatting with Claude directly).
+- **CI mode**: the environment variable `CI` is set to `true` (this is the case in the GitHub Actions pipeline that invokes this skill in non-interactive/print mode).
+- **Interactive mode**: `CI` is not set (a human is chatting with the agent directly).
 
 **In CI mode there is no human available to answer questions.** `--print` is a single-shot, non-interactive invocation — if this skill ever stops to ask a question and wait for a reply, the run silently wastes its turn budget and ends without doing anything useful. So in CI mode:
 
@@ -346,28 +346,12 @@ Guía por tipo de hallazgo:
 ## Usage examples
 
 **CI (GitHub Actions, env vars already set: `GITHUB_REPOSITORY`, `PR_NUMBER`, `GITHUB_BASE_REF`, `CI=true`):**
+
+Run the agent in non-interactive/print mode with the skill's SKILL.md as input. The exact command depends on the agent being used. The agent needs access to `git`, `gh`, `jq`, `ls`, `cat`, `find`, `grep`, `head`, `mkdir`, `tr`, `echo`, `bash`, `Read`, and `Write` tools.
+
+Example (generic):
 ```bash
-claude \
-  --print \
-  --dangerously-skip-permissions \
-  --verbose \
-  --output-format stream-json \
-  --max-turns 40 \
-  --allowedTools "Bash(git:*)" \
-  --allowedTools "Bash(gh:*)" \
-  --allowedTools "Bash(jq:*)" \
-  --allowedTools "Bash(ls:*)" \
-  --allowedTools "Bash(cat:*)" \
-  --allowedTools "Bash(find:*)" \
-  --allowedTools "Bash(grep:*)" \
-  --allowedTools "Bash(head:*)" \
-  --allowedTools "Bash(mkdir:*)" \
-  --allowedTools "Bash(tr:*)" \
-  --allowedTools "Bash(echo:*)" \
-  --allowedTools "Bash(bash:*)" \
-  --allowedTools "Read" \
-  --allowedTools "Write" \
-  < .claude/skills/pr-review/SKILL.md
+<agent-cli> --print --max-turns 40 < SKILL.md
 ```
 
 **Interactive:**
