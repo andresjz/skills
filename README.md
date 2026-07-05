@@ -18,6 +18,12 @@ Use `-g` to install globally (available across all projects):
 npx skills add andresjz/skills -g
 ```
 
+This command will list all skills available
+
+```bash
+npx skills add andresjz/skills --list
+```
+
 ## Skills
 
 | Skill | Description | Source |
