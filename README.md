@@ -31,6 +31,8 @@ This command will install specific version
 npx skills add andresjz/skills#v1.0.0 --list
 
 npx skills add andresjz/skills#v1.0.0@release
+
+npx skills add andresjz/skills#v1.0.0@review-pr-clickup
 ```
 
 

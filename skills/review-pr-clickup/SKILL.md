@@ -30,7 +30,7 @@ In Interactive mode, keep the original behavior: ask for the PR if not given, an
 - `gh` must be authenticated (`gh auth status`)
 - `clickup-cli` must be installed and accessible in PATH
 - `CLICKUP_TOKEN` environment variable must be set for ClickUp authentication
-- `CLICKUP_TEAM_ID` environment variable must be set (e.g., `90131366728`)
+- `CLICKUP_TEAM_ID` environment variable must be set (e.g., `90111366728`)
 - The `.github/instructions/` directory must exist with instruction files
 - The PR must be open and accessible
 
