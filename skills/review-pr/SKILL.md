@@ -1,6 +1,9 @@
 ---
 name: review-pr
 description: Review an open GitHub Pull Request, analyze changes against relevant .github/instructions, and post structured review comments directly on the PR.
+compatibility: Requires gh CLI (authenticated), git, jq. The .github/instructions/ directory must exist in the target repo.
+metadata:
+  version: "1.0.0"
 ---
 
 # Review Pull Request
