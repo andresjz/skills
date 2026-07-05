@@ -25,6 +25,15 @@ This command will list all skills available
 npx skills add andresjz/skills --list
 ```
 
+This command will install specific version 
+
+```bash
+npx skills add andresjz/skills#v1.0.0 --list
+
+npx skills add andresjz/skills#v1.0.0@release
+```
+
+
 ## Skills
 
 | Skill | Description | Source |
