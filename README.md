@@ -26,6 +26,7 @@ npx skills add andresjz/skills -g
 | [webapp-testing](skills/webapp-testing) | Playwright-based toolkit for testing local web apps. Supports screenshot capture, browser logs, UI debugging, and frontend verification. | [anthropics/skills](https://github.com/anthropics/skills) |
 | [find-skills](skills/find-skills) | Meta-skill that helps discover and install other skills from the ecosystem via `npx skills find`. | [vercel-labs/skills](https://github.com/vercel-labs/skills) |
 | [python-testing-patterns](skills/python-testing-patterns) | Comprehensive pytest testing strategies: fixtures, mocking, parameterization, and TDD workflows. | [wshobson/agents](https://github.com/wshobson/agents) |
+| [pr-review](skills/pr-review) | Review GitHub PRs against `.github/instructions`, post structured comments with suggestions. Supports CI and interactive mode. | Original |
 | [git-workflow-and-versioning](skills/git-workflow-and-versioning) | Git workflow practices: committing, branching, conflict resolution, semantic versioning, releases, and changelogs. | [addyosmani/agent-skills](https://github.com/addyosmani/agent-skills) |
 
 ## Compatible Agents
