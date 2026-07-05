@@ -1,7 +1,7 @@
 ---
 name: release
 description: Create semantic version releases with auto-generated changelogs based on conventional commits
-compatibility: Requires git. Optional: gh CLI for GitHub releases
+compatibility: Requires git. Optional gh CLI for GitHub releases
 metadata:
   version: "1.0.0"
 ---
