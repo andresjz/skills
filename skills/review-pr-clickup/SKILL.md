@@ -3,7 +3,7 @@ name: review-pr-clickup
 description: Revisa un PR de GitHub con contexto de ticket ClickUp - analiza cambios contra requisitos y criterios de aceptación del ticket
 compatibility: Requiere gh CLI (autenticado), git, jq, clickup-cli (con CLICKUP_TOKEN y CLICKUP_TEAM_ID). El directorio .github/instructions/ debe existir en el repo objetivo.
 metadata:
-  version: "1.0.0"
+  version: "1.0.1"
 ---
 
 # Review Pull Request con Contexto ClickUp
@@ -25,6 +25,17 @@ This skill runs in **two possible modes**. Detect the mode before doing anything
 - **Never wait for user input of any kind.**
 
 In Interactive mode, keep the original behavior: ask for the PR if not given, and ask for confirmation (sí/no) before posting.
+
+**Before doing anything else, run this exact command to detect the mode and capture context — never assume a mode without running it:**
+
+```bash
+env | grep -E '^(CI|PR_NUMBER|GITHUB_REPOSITORY|GITHUB_BASE_REF|CLICKUP_TOKEN|CLICKUP_TEAM_ID)=' || true
+```
+
+- If the output includes a line `CI=true`, you are in **CI mode**. Use `GITHUB_REPOSITORY` as `$REPO` and `PR_NUMBER` as `$PR` (see step 1) — never ask the user for them.
+- If `CI` is not set, empty, or `false` (no `CI=true` line in the output), you are in **Interactive mode** — proceed to ask for the PR if not given, and ask for confirmation before posting.
+
+Do not rely on the model "remembering" env vars or inferring the mode from context. Always read them explicitly with the command above as the very first action of the run.
 
 ## Prerequisites
 - `gh` must be authenticated (`gh auth status`)
@@ -464,6 +475,7 @@ Guía por tipo de hallazgo:
 - **CI mode never blocks on a question.** If at any point the instructions below seem to require waiting for a human, prefer the CI-mode default from the "Execution mode" section over stalling.
 - Global budget: if you notice you are repeating the same class of action (e.g. retrying inline comments) more than ~5 times across the whole run, stop attempting inline comments entirely, note it in the summary comment, and finish.
 - **Always run step 7 (cleanup)** before ending, regardless of how the run went — emptying the working files is not optional, even on early exit/error paths.
+- **Mode detection is mandatory and explicit.** Always run the `env | grep -E '^(CI|PR_NUMBER|...)' ` check from the "Execution mode" section as the very first action, before deciding mode. Never assume interactive without verification; never assume CI without verification. Skipping this check and guessing the mode causes silent run failures.
 
 ## Usage examples
 
