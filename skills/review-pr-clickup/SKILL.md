@@ -3,7 +3,7 @@ name: review-pr-clickup
 description: Revisa un PR de GitHub con contexto de ticket ClickUp - analiza cambios contra requisitos y criterios de aceptación del ticket
 compatibility: Requiere gh CLI (autenticado), git, jq, clickup-cli (con CLICKUP_TOKEN y CLICKUP_TEAM_ID). El directorio .github/instructions/ debe existir en el repo objetivo.
 metadata:
-  version: "1.0.1"
+  version: "1.2.0"
 ---
 
 # Review Pull Request con Contexto ClickUp
@@ -11,31 +11,41 @@ metadata:
 ## Purpose
 Review a specific GitHub Pull Request by fetching its diff, analyzing it against the relevant `.github/instructions` files and ClickUp ticket requirements, and posting structured review comments directly on the PR using the GitHub CLI (`gh`).
 
-## Execution mode (read this first)
+## Step 1: Resolve context — always run the bundled script first
 
-This skill runs in **two possible modes**. Detect the mode before doing anything else:
+Steps 1, 2, 3, and 3.5 of the old workflow (resolving `REPO`/`PR`, computing an isolated `WORKDIR`, checking the working tree is clean, fetching the PR diff/metadata/comments via `gh`, and detecting/fetching a ClickUp ticket) are **100% mechanical** — no judgement is required, so they are implemented once as a bundled script instead of being described in prose for you to reproduce by hand. Reproducing this logic yourself (recomputing `WORKDIR`, re-running individual `gh` calls) is exactly what causes drift and confusion about paths later in a run — always defer to the script instead.
 
-- **CI mode**: the environment variable `CI` is set to `true` (this is the case in the GitHub Actions pipeline that invokes this skill in non-interactive/print mode).
-- **Interactive mode**: `CI` is not set (a human is chatting with the agent directly).
-
-**In CI mode there is no human available to answer questions.** `--print` is a single-shot, non-interactive invocation — if this skill ever stops to ask a question and wait for a reply, the run silently wastes its turn budget and ends without doing anything useful. So in CI mode:
-
-- **Never ask for the PR number/repo.** Read them from environment variables (see step 1).
-- **Never ask for confirmation before posting.** The pipeline itself is the approval gate (a human triggered the workflow, or reviews the run logs). Post directly once the review is generated.
-- **Never wait for user input of any kind.**
-
-In Interactive mode, keep the original behavior: ask for the PR if not given, and ask for confirmation (sí/no) before posting.
-
-**Before doing anything else, run this exact command to detect the mode and capture context — never assume a mode without running it:**
+**Run this as your first action, every time, regardless of mode:**
 
 ```bash
-env | grep -E '^(CI|PR_NUMBER|GITHUB_REPOSITORY|GITHUB_BASE_REF|CLICKUP_TOKEN|CLICKUP_TEAM_ID)=' || true
+bash "$(dirname "$0")/../scripts/prefetch.sh" --repo "$REPO" --pr "$PR"
 ```
 
-- If the output includes a line `CI=true`, you are in **CI mode**. Use `GITHUB_REPOSITORY` as `$REPO` and `PR_NUMBER` as `$PR` (see step 1) — never ask the user for them.
-- If `CI` is not set, empty, or `false` (no `CI=true` line in the output), you are in **Interactive mode** — proceed to ask for the PR if not given, and ask for confirmation before posting.
+In practice, resolve the path to `scripts/prefetch.sh` relative to wherever this `SKILL.md` was installed (e.g. `~/.claude/skills/review-pr-clickup/scripts/prefetch.sh`) and pass `--repo owner/repo --pr NUMBER`. If a caller (e.g. a CI pipeline) already ran this exact script before invoking you and told you so, you do not need to run it again — but if you are ever unsure, **just run it anyway**: it is idempotent (already-fetched files are reused, not re-fetched) and safe to call as many times as you want, including with no arguments beyond `--print-workdir-only` if you just need to recover `WORKDIR` cheaply without hitting the network.
 
-Do not rely on the model "remembering" env vars or inferring the mode from context. Always read them explicitly with the command above as the very first action of the run.
+The script prints (and persists to `$WORKDIR/context.env`) a final block like:
+```
+MODE=CI|INTERACTIVE
+REPO=owner/repo
+PR=123
+WORKDIR=/tmp/pr_review/owner_repo/123
+SHA=<head-commit-sha>
+TICKET_ID=CU-xxxxxxxx (or empty)
+CLICKUP_STATUS=fetched|skipped|error|no_ticket
+```
+
+Use these values as authoritative — never recompute `WORKDIR` by hand, never re-derive `REPO`/`PR` from context, never guess `SHA`. If you need any of them again later in the run, either keep them from this output or re-run `--print-workdir-only` to recover `WORKDIR` and read the rest from `$WORKDIR/context.env`.
+
+**Exit codes to handle:**
+- `0`: success, proceed to step 4.
+- `1`: fatal — missing `REPO`/`PR`, or a dirty working tree in CI mode. Print the script's own error output and stop; do not try to work around it.
+- `2`: dirty working tree in interactive mode. Tell the user to commit/stash first (or re-run yourself with `--force` only if the user explicitly confirms that's fine).
+
+**No PR given (interactive mode only):** if you don't have a `--repo`/`--pr` yet, ask the user for a PR URL or `owner/repo#number` (e.g. `andresjz/API#1`) before running the script. In CI mode, `REPO`/`PR` come from `GITHUB_REPOSITORY`/`PR_NUMBER` env vars, which the script reads automatically — never ask a question in CI mode (see below).
+
+**Mode and posting behavior**, from the script's `MODE=` output:
+- **`MODE=CI`**: never ask for confirmation before posting — the pipeline itself is the approval gate. Post the review directly once generated (step 6). Never wait for user input of any kind.
+- **`MODE=INTERACTIVE`**: show the draft to the user and ask for confirmation (see step 5) before posting.
 
 ## Prerequisites
 - `gh` must be authenticated (`gh auth status`)
@@ -47,113 +57,7 @@ Do not rely on the model "remembering" env vars or inferring the mode from conte
 
 ## Required workflow
 
-### 1. Resolve PR context
-
-**CI mode**: read directly from environment, do not ask the user anything:
-```bash
-echo "REPO=$GITHUB_REPOSITORY"
-echo "PR=$PR_NUMBER"
-echo "BASE=$GITHUB_BASE_REF"
-```
-If `GITHUB_REPOSITORY` or `PR_NUMBER` is empty, stop and print a clear error (`"[FATAL] Missing GITHUB_REPOSITORY or PR_NUMBER env vars"`) instead of asking a question — there is no one to answer it.
-
-**Interactive mode**: the user must provide a PR URL or `owner/repo#number` format (e.g., `andresjz/API#1`). If not provided, ask for it. Default repo can be inferred from `gh pr view`.
-
-From here on, `$REPO` and `$PR` refer to whichever of the two sources above was used. Persist them once in a shell variable/temp file at the start and reuse — do not re-derive them repeatedly.
-
-**Define an isolated working directory for this run, scoped by repo and PR number.** The runner may execute multiple reviews concurrently (different PRs, or even the same PR re-triggered), so a shared `/tmp/pr_review` path can cause one run to read/overwrite another run's cached files. Always do this before step 3:
-
-```bash
-REPO_SAFE=$(echo "$REPO" | tr '/' '_')
-WORKDIR="/tmp/pr_review/${REPO_SAFE}/${PR}"
-mkdir -p "$WORKDIR"
-echo "WORKDIR=$WORKDIR"
-```
-
-Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `summary.md`, `inline_comment.json`) lives under `$WORKDIR`, not under a fixed shared path.
-
-### 2. Check working tree status (safety guard)
-```bash
-git status --short
-```
-If this returns any output, stop and tell the user to commit/stash first (Interactive mode) or fail the step with a clear message (CI mode).
-Ignore changes to SKILL.md, AGENTS.md, Taskfile.yml, OPENCODE_SETUP.md.
-
-### 3. Fetch the PR metadata, diff, and comments — once, cache locally
-
-Fetch everything needed in this step and write it to temp files. Do **not** re-fetch the same data later in the run; reuse the files.
-
-```bash
-gh pr view "$PR" --repo "$REPO" --json number,title,body,headRefName,baseRefName,author,additions,deletions > "$WORKDIR/meta.json"
-gh pr diff "$PR" --repo "$REPO" > "$WORKDIR/diff.txt"
-gh pr view "$PR" --repo "$REPO" --json files --jq '.files[].path' > "$WORKDIR/files.txt"
-gh pr view "$PR" --repo "$REPO" --json commits --jq '.commits[-1].oid' > "$WORKDIR/head_sha.txt"
-gh pr view "$PR" --repo "$REPO" --json comments --jq '.comments[] | {author: .author.login, body: .body, createdAt: .createdAt}' > "$WORKDIR/comments.json"
-gh api "/repos/$REPO/pulls/$PR/comments" --jq '.[] | {path: .path, line: .line, body: .body, author: .user.login}' > "$WORKDIR/inline_comments.json"
-```
-
-Read `SHA=$(cat "$WORKDIR/head_sha.txt")` once and reuse it for every inline comment in step 6 — do not call `gh pr view --json commits` again.
-
-### 3.5. Extract and fetch ClickUp ticket context
-
-**Check prerequisites:**
-```bash
-if ! command -v clickup-cli &> /dev/null; then
-  echo "WARNING: clickup-cli not found. Skipping ClickUp integration."
-  echo "SKIP_CLICKUP=true" >> "$WORKDIR/clickup_status.txt"
-elif [ -z "$CLICKUP_TOKEN" ]; then
-  echo "WARNING: CLICKUP_TOKEN not set. Skipping ClickUp integration."
-  echo "SKIP_CLICKUP=true" >> "$WORKDIR/clickup_status.txt"
-elif [ -z "$CLICKUP_TEAM_ID" ]; then
-  echo "WARNING: CLICKUP_TEAM_ID not set. Skipping ClickUp integration."
-  echo "SKIP_CLICKUP=true" >> "$WORKDIR/clickup_status.txt"
-else
-  echo "SKIP_CLICKUP=false" >> "$WORKDIR/clickup_status.txt"
-fi
-```
-
-**Extract ticket ID from branch name:**
-The branch naming convention is: `CU-XXXXXXXX_description_assignee`
-Example: `CU-86ajc6ce5_Add-validation-for`
-
-```bash
-BRANCH=$(gh pr view "$PR" --repo "$REPO" --json headRefName --jq '.headRefName')
-TICKET_ID=$(echo "$BRANCH" | grep -oE 'CU-[a-zA-Z0-9]+' | head -1)
-
-if [ -n "$TICKET_ID" ]; then
-  echo "$TICKET_ID" > "$WORKDIR/clickup_tickets.txt"
-  echo "Found ticket ID: $TICKET_ID from branch: $BRANCH"
-else
-  echo "No ClickUp ticket ID found in branch name: $BRANCH"
-  echo "NO_TICKET=true" >> "$WORKDIR/clickup_status.txt"
-fi
-```
-
-**Fallback: Check PR body for ticket references:**
-```bash
-if [ -z "$TICKET_ID" ]; then
-  PR_BODY=$(cat "$WORKDIR/meta.json" | jq -r '.body // empty')
-  TICKET_ID=$(echo "$PR_BODY" | grep -oE 'CU-[a-zA-Z0-9]+' | head -1)
-  if [ -n "$TICKET_ID" ]; then
-    echo "$TICKET_ID" > "$WORKDIR/clickup_tickets.txt"
-    echo "Found ticket ID: $TICKET_ID from PR description"
-  fi
-fi
-```
-
-**Fetch ticket summary:**
-```bash
-if [ -n "$TICKET_ID" ] && [ "$(grep SKIP_CLICKUP "$WORKDIR/clickup_status.txt" 2>/dev/null | cut -d= -f2)" != "true" ]; then
-  echo "Fetching ClickUp ticket summary for: $TICKET_ID"
-  if ! clickup-cli task summary "$TICKET_ID" --team "$CLICKUP_TEAM_ID" > "$WORKDIR/clickup_summary.txt" 2>&1; then
-    echo "ERROR: Failed to fetch ClickUp ticket summary" >> "$WORKDIR/clickup_status.txt"
-    echo "TICKET_FETCH_ERROR=true" >> "$WORKDIR/clickup_status.txt"
-  else
-    echo "TICKET_FETCH_SUCCESS=true" >> "$WORKDIR/clickup_status.txt"
-    echo "Successfully fetched ClickUp ticket summary"
-  fi
-fi
-```
+Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `context.env`, `summary.md`, `inline_comment.json`) lives under the `WORKDIR` printed by `scripts/prefetch.sh` in step 1 above — never under a different or hand-computed path.
 
 ### 4. Discover and load only relevant instructions (repo-agnostic)
 
@@ -299,7 +203,7 @@ for f in "$WORKDIR/meta.json" \
          "$WORKDIR/inline_comments.json" \
          "$WORKDIR/clickup_tickets.txt" \
          "$WORKDIR/clickup_summary.txt" \
-         "$WORKDIR/clickup_status.txt" \
+         "$WORKDIR/context.env" \
          "$WORKDIR/summary.md" \
          "$WORKDIR/inline_comment.json"; do
   [ -f "$f" ] && echo "" > "$f"
@@ -465,17 +369,16 @@ Guía por tipo de hallazgo:
 - Reading outside the PR diff is allowed **only** in the bounded way described in step 5 (verifying a specific pattern/duplication finding, capped at ~5 extra file reads, targeted grep over browsing). Do not use it as general exploration.
 - Do not broaden the task beyond the PR scope.
 - Do not repeat the same command or reasoning path.
-- Fetch PR metadata/diff/comments **once** (step 3) and reuse the cached files in `$WORKDIR` — never re-fetch.
-- Fetch ClickUp ticket summary **once** (step 3.5) and reuse the cached file — never re-fetch.
+- PR metadata/diff/comments and the ClickUp ticket summary are fetched **once**, by `scripts/prefetch.sh` in step 1 — reuse the cached files in `$WORKDIR`, never re-fetch them yourself with `gh`/`clickup-cli` directly.
 - If the diff is large (>1000 lines), prioritize the files most likely to carry risk for *this* repo — infer from what actually changed and from which loaded instruction files flagged them as sensitive (e.g. auth/security-related code, data access/migration files, public API contracts, infra state) rather than assuming a fixed backend layer like "services/controllers". Explicitly state which files were skipped and why.
 - If information is missing, state the limitation instead of guessing.
 - Limit every tool call to a maximum of **2 attempts**. On the first failure, print the full output/error and explain why. If it fails a second time, skip it and continue — never retry a third time with a variation.
 - Inline comments: max **2 attempts per finding** (see Option B). After that, fall back to a general comment and move on.
 - ClickUp ticket fetch: max **2 attempts**. After that, note the failure and proceed without ClickUp context.
-- **CI mode never blocks on a question.** If at any point the instructions below seem to require waiting for a human, prefer the CI-mode default from the "Execution mode" section over stalling.
+- **CI mode never blocks on a question.** If at any point the instructions below seem to require waiting for a human, prefer the CI-mode default (see `MODE=` from step 1) over stalling.
 - Global budget: if you notice you are repeating the same class of action (e.g. retrying inline comments) more than ~5 times across the whole run, stop attempting inline comments entirely, note it in the summary comment, and finish.
 - **Always run step 7 (cleanup)** before ending, regardless of how the run went — emptying the working files is not optional, even on early exit/error paths.
-- **Mode detection is mandatory and explicit.** Always run the `env | grep -E '^(CI|PR_NUMBER|...)' ` check from the "Execution mode" section as the very first action, before deciding mode. Never assume interactive without verification; never assume CI without verification. Skipping this check and guessing the mode causes silent run failures.
+- **Step 1 (`scripts/prefetch.sh`) is mandatory and must always run first**, before anything else, in every mode. Never hand-derive `REPO`/`PR`/`WORKDIR`/`SHA`/`TICKET_ID` yourself — the script is the single source of truth and is idempotent, so there is no cost to running it again if you're ever unsure. Guessing or recomputing any of these values by hand is exactly the failure mode this script exists to eliminate.
 
 ## Usage examples
 
@@ -487,6 +390,8 @@ Example (generic):
 ```bash
 <agent-cli> --print --max-turns 40 < SKILL.md
 ```
+
+**CI, recommended:** the pipeline can optionally call `scripts/prefetch.sh --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"` itself before invoking the agent, purely to fail the job fast on a fetch error outside the agent's turn budget. Either way, the agent will run (or re-run, harmlessly) the same script as its first action in step 1 — there's no separate "fast path" prompt wiring needed anymore, since the script is bundled with the skill and idempotent by design. This is the intended integration for pipelines using models less reliable at following plain prose instructions (e.g. non-Claude models behind a relay) — it removes an entire class of hallucinated/invented context values and cuts token usage.
 
 **Interactive:**
 - User: "Review PR myorg/myrepo#42"
