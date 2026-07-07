@@ -122,7 +122,7 @@ If `$WORKDIR/clickup_summary.txt` exists and contains ticket data:
 
 **CI mode**: skip this. Go straight to step 6.
 
-**Prepare inline-comment candidates as you go, not afterward.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), append one line to `$WORKDIR/findings.jsonl` **right when you identify it** — while you're still looking at that exact diff hunk, not later when generating the final summary.
+**Prepare inline-comment candidates while you analyze, but write them in one batch, not one tool call per finding.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), determine and note its `path`/`line`/`tag`/`body` **right when you identify it** — while you're still looking at that exact diff hunk (see the line-number rule below) — but keep it in your own working notes for now. Only after you've finished analyzing every file, write **all** collected findings to `$WORKDIR/findings.jsonl` in a **single** `Bash` call (one heredoc, one line per finding). **Never make a separate `Bash` tool call per finding to append to this file** — each tool call consumes a turn from your budget, and on a large PR with many findings this can exhaust it before you ever reach step 6 (posting), resulting in *zero* comments posted at all, not even the general summary. This is stack-agnostic: it happens on any large PR regardless of language.
 
 **Never use the line-number gutter shown when you `Read` `diff.txt` as the `line` value.** `diff.txt` is one large file concatenating every changed file's diff — the numbers the `Read` tool shows you (e.g. `847\t+  <AppMenu>`) are `diff.txt`'s own line numbers, completely unrelated to the target file's real line numbers. Using them directly is the single most common cause of `"could not be resolved"` errors: it can coincidentally work for the first file near the top of the diff (small offset) and will reliably fail for every file further down (the offset only grows). Do not treat this as an edge case — it happens on every multi-file PR.
 
@@ -132,10 +132,11 @@ grep -n -F "<distinctive snippet from the exact line, e.g. a function/method cal
 ```
 Use a distinctive substring from the exact line you're commenting on (the more unique, the better — avoid single common tokens like `}` or `);` or `pass` that repeat throughout any file in any language). This gives you the file's real line number directly, with zero risk of confusing it with `diff.txt`'s own numbering. Only fall back to manually counting from the hunk header (`@@ -old_start,old_count +new_start,new_count @@`) if `grep` can't uniquely locate the line (e.g. the snippet repeats in the file) — and if you do, double-check the result against `grep -c` for that same snippet to catch duplicates.
 
-Append with a single JSON object per line (JSONL), one `cat >>` per finding:
+Write all findings at once (single call, one JSON object per line — JSONL):
 ```bash
-cat >> "$WORKDIR/findings.jsonl" << EOF
+cat > "$WORKDIR/findings.jsonl" << EOF
 {"path": "<path/to/file>", "line": 42, "start_line": null, "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
+{"path": "<path/to/other-file>", "line": 17, "start_line": null, "tag": "PATTERN", "body": "[PATTERN] another finding's full comment body here"}
 EOF
 ```
 By the time you reach step 6, `findings.jsonl` already has every inline-comment candidate fully resolved (path + line + body) — step 6 just executes them, it does not re-derive anything.
@@ -143,6 +144,8 @@ By the time you reach step 6, `findings.jsonl` already has every inline-comment 
 ### 6. Post the review
 
 **CI mode**: post automatically, no confirmation needed. **Interactive mode**: only after user confirmation.
+
+**Priority order: always post Option A (the general summary) first, before attempting any Option B inline comments.** If you're running low on turns, a posted general summary with no inline comments is a successful run; ending with zero comments posted at all (because turns ran out mid-analysis, before ever reaching step 6) is the failure this order avoids.
 
 #### Option A: Post as a PR comment (simple, always works)
 Always write the body to a temp file first — never inline multiline content into `--body`, this is a common source of shell-escaping failures that cause retries/loops:
@@ -406,6 +409,8 @@ Guía por tipo de hallazgo:
 - ClickUp ticket fetch: max **2 attempts**. After that, note the failure and proceed without ClickUp context.
 - **CI mode never blocks on a question.** If at any point the instructions below seem to require waiting for a human, prefer the CI-mode default (see `MODE=` from step 1) over stalling.
 - Global budget: if you notice you are repeating the same class of action (e.g. retrying inline comments) more than ~5 times across the whole run, stop attempting inline comments entirely, note it in the summary comment, and finish.
+- **Never make one `Bash` tool call per finding to build `findings.jsonl`** (or for any similarly repetitive bookkeeping) — batch it into a single call once analysis is done. Turns are a hard budget; spending them one-per-finding on a large PR can exhaust it before step 6 (posting) is ever reached, which means *no* comment gets posted at all, not even the general summary.
+- **Post the general summary (step 6, Option A) before attempting any inline comments (Option B).** If turns run short, a posted summary with no inline comments is still a successful run.
 - **Always run step 7 (cleanup)** before ending, regardless of how the run went — emptying the working files is not optional, even on early exit/error paths.
 - **Step 1 (`scripts/prefetch.sh`) is mandatory and must always run first**, before anything else, in every mode. Never hand-derive `REPO`/`PR`/`WORKDIR`/`SHA`/`TICKET_ID` yourself — the script is the single source of truth and is idempotent, so there is no cost to running it again if you're ever unsure. Guessing or recomputing any of these values by hand is exactly the failure mode this script exists to eliminate.
 
