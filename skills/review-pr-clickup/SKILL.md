@@ -3,7 +3,7 @@ name: review-pr-clickup
 description: Revisa un PR de GitHub con contexto de ticket ClickUp - analiza cambios contra requisitos y criterios de aceptación del ticket
 compatibility: Requiere gh CLI (autenticado), git, jq, clickup-cli (con CLICKUP_TOKEN y CLICKUP_TEAM_ID). El directorio .github/instructions/ debe existir en el repo objetivo.
 metadata:
-  version: "1.0.5"
+  version: "1.1.0"
 ---
 
 # Review Pull Request con Contexto ClickUp
@@ -60,7 +60,7 @@ Use these values as authoritative — never recompute `WORKDIR` by hand, never r
 
 ## Required workflow
 
-Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `context.env`, `summary.md`, `findings.jsonl`, `inline_comment.json`) lives under the `WORKDIR` printed by `scripts/prefetch.sh` in step 1 above — never under a different or hand-computed path.
+Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `context.env`, `summary.md`, `summary_simple.md`, `summary_fallbacks.md`, `findings.jsonl`) lives under the `WORKDIR` printed by `scripts/prefetch.sh` in step 1 above — never under a different or hand-computed path.
 
 ### 4. Discover and load only relevant instructions (repo-agnostic)
 
@@ -122,104 +122,40 @@ If `$WORKDIR/clickup_summary.txt` exists and contains ticket data:
 
 **CI mode**: skip this. Go straight to step 6.
 
-**Prepare inline-comment candidates while you analyze, but write them in one batch, not one tool call per finding.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), determine and note its `path`/`line`/`tag`/`body` **right when you identify it** — while you're still looking at that exact diff hunk (see the line-number rule below) — but keep it in your own working notes for now. Only after you've finished analyzing every file, write **all** collected findings to `$WORKDIR/findings.jsonl` in a **single** `Bash` call (one heredoc, one line per finding). **Never make a separate `Bash` tool call per finding to append to this file** — each tool call consumes a turn from your budget, and on a large PR with many findings this can exhaust it before you ever reach step 6 (posting), resulting in *zero* comments posted at all, not even the general summary. This is stack-agnostic: it happens on any large PR regardless of language.
+**Prepare inline-comment candidates while you analyze, but write them in one batch, not one tool call per finding.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), determine its `path`/`snippet`/`tag`/`body` **right when you identify it** — while you're still looking at that exact diff hunk — but keep it in your own working notes for now. Only after you've finished analyzing every file, write **all** collected findings to `$WORKDIR/findings.jsonl` in a **single** `Bash` call (one heredoc, one line per finding). **Never make a separate `Bash` tool call per finding to append to this file** — each tool call consumes a turn from your budget, and on a large PR with many findings this can exhaust it before you ever reach step 6 (posting), resulting in *zero* comments posted at all, not even the general summary. This is stack-agnostic: it happens on any large PR regardless of language.
 
-**Never use the line-number gutter shown when you `Read` `diff.txt` as the `line` value.** `diff.txt` is one large file concatenating every changed file's diff — the numbers the `Read` tool shows you (e.g. `847\t+  <AppMenu>`) are `diff.txt`'s own line numbers, completely unrelated to the target file's real line numbers. Using them directly is the single most common cause of `"could not be resolved"` errors: it can coincidentally work for the first file near the top of the diff (small offset) and will reliably fail for every file further down (the offset only grows). Do not treat this as an edge case — it happens on every multi-file PR.
+**You do not compute line numbers — write a distinctive `snippet` instead.** The `post_review.sh` script (step 6) resolves snippets to line numbers mechanically. Choose the most unique substring on the exact line you're commenting on — a function/method call, string literal, or variable assignment that appears only once in that file. Avoid single common tokens (`}`, `);`, `pass`, `return`, `null`) that repeat throughout any file. The more distinctive, the more reliable the resolution.
 
-**Always determine the real line number by locating the code in the actual file, not by counting inside the diff** (works the same regardless of language/stack — Java, Python, TypeScript, Go, etc.):
-```bash
-grep -n -F "<distinctive snippet from the exact line, e.g. a function/method call, string literal, or variable assignment>" "$REPO_ROOT/<path/to/file>"
-```
-Use a distinctive substring from the exact line you're commenting on (the more unique, the better — avoid single common tokens like `}` or `);` or `pass` that repeat throughout any file in any language). This gives you the file's real line number directly, with zero risk of confusing it with `diff.txt`'s own numbering. Only fall back to manually counting from the hunk header (`@@ -old_start,old_count +new_start,new_count @@`) if `grep` can't uniquely locate the line (e.g. the snippet repeats in the file) — and if you do, double-check the result against `grep -c` for that same snippet to catch duplicates.
+**For multi-line suggestion blocks**, add `start_snippet` with the first line of the range (in addition to `snippet` which remains the last line). The script will resolve both and build the correct range payload.
 
 Write all findings at once (single call, one JSON object per line — JSONL):
 ```bash
 cat > "$WORKDIR/findings.jsonl" << EOF
-{"path": "<path/to/file>", "line": 42, "start_line": null, "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
-{"path": "<path/to/other-file>", "line": 17, "start_line": null, "tag": "PATTERN", "body": "[PATTERN] another finding's full comment body here"}
+{"path": "<path/to/file>", "snippet": "<distinctive substring from the exact line>", "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
+{"path": "<path/to/other-file>", "snippet": "<last line of range>", "start_snippet": "<first line of range>", "tag": "PATTERN", "body": "[PATTERN] another finding's full comment body here"}
 EOF
 ```
-By the time you reach step 6, `findings.jsonl` already has every inline-comment candidate fully resolved (path + line + body) — step 6 just executes them, it does not re-derive anything.
+By the time you reach step 6, `findings.jsonl` has every inline-comment candidate's identifying information — the script resolves line numbers and posts automatically.
 
 ### 6. Post the review
 
 **CI mode**: post automatically, no confirmation needed. **Interactive mode**: only after user confirmation.
 
-**Priority order: always post Option A (the general summary) first, before attempting any Option B inline comments.** If you're running low on turns, a posted general summary with no inline comments is a successful run; ending with zero comments posted at all (because turns ran out mid-analysis, before ever reaching step 6) is the failure this order avoids.
-
-#### Option A: Post as a PR comment (simple, always works)
-Always write the body to a temp file first — never inline multiline content into `--body`, this is a common source of shell-escaping failures that cause retries/loops:
-```bash
-cat > "$WORKDIR/summary.md" << 'ENDOFFILE'
-<review_content>
-ENDOFFILE
-gh pr comment "$PR" --repo "$REPO" --body-file "$WORKDIR/summary.md"
-```
-
-#### Option B: Post inline comments on specific lines (for critical findings)
-
-**This step only executes what step 5 already prepared in `$WORKDIR/findings.jsonl` — it does not decide line numbers itself.** Each line of that file already has `path`/`line`/`body` resolved; here you just add `commit_id`/`side` (the only fields that are the same for every entry, so there's no point storing them per-line) and post.
-
-Use temp JSON files, not process substitution (`<(...)`) — process substitution is not supported by `sh`/`dash` and silently fails on some CI runners, which is a likely source of retry loops:
+All posting logic is handled by `scripts/post_review.sh` — a deterministic script that:
+1. Reads `$WORKDIR/findings.jsonl` (written in step 5) and `$WORKDIR/summary.md`
+2. Resolves each finding's `snippet` to a real line number via `grep -n -F`
+3. Posts the summary via `gh pr comment` (Option A)
+4. Posts each inline comment via `gh api POST .../pulls/.../comments` (Option B)
+5. Retries once on failure, falls back to a follow-up general comment if inline fails
+6. Reports results to stdout
 
 ```bash
-SHA=$(cat "$WORKDIR/head_sha.txt")
-
-while IFS= read -r finding; do
-  [ -z "$finding" ] && continue
-  jq --arg sha "$SHA" '. + {commit_id: $sha, side: "RIGHT"}' <<< "$finding" \
-    > "$WORKDIR/inline_comment.json"
-
-  gh api \
-    --method POST \
-    -H "Accept: application/vnd.github.v3+json" \
-    "/repos/$REPO/pulls/$PR/comments" \
-    --input "$WORKDIR/inline_comment.json"
-done < "$WORKDIR/findings.jsonl"
+bash "$(dirname "$0")/../scripts/post_review.sh"
 ```
 
-**Hard rule to prevent loops:** for a given finding, attempt an inline comment **at most twice** (e.g. the line from `findings.jsonl`, then one nearby line inside the same hunk if the first is rejected with "could not be resolved"). If both attempts fail, **do not keep guessing lines** — immediately fall back to including that finding in the Option A general PR comment instead, tagged with the file/line in text, and move on to the next finding.
+**Exit codes:** `post_review.sh` exits 0 on success (including partial success with fallbacks), or 1 if the summary comment itself could not be posted.
 
-##### Using `suggestion` blocks (one-click auto-apply)
-
-GitHub renders a fenced ```` ```suggestion ```` code block inside an inline PR comment as an "Apply suggestion" button, letting the PR author accept the exact replacement with one click. Use this whenever the fix is **mechanical and safe to apply verbatim** — e.g. a null check, a typo, a wrong variable, a missing import, a formatting issue, a simple off-by-one. This is the single highest-leverage change reviewers can make, since it turns a comment into a one-click fix instead of manual retyping.
-
-The body of the comment is: a short explanation, then a suggestion fence containing **only** the corrected code that should replace the commented line(s) — nothing else inside the fence (no comments-about-the-code, no partial line).
-
-**Illustrative example (write the suggestion in whatever language the file actually is — Java below, but the same principle applies to Python, TypeScript, Go, etc.):**
-```
-[BUG] `user` puede ser null aquí si el lookup falla; agrega el check antes de usarlo.
-
-```suggestion
-if (user == null) {
-    return Optional.empty();
-}
-```
-```
-
-For a **single line** fix, comment on that `line` as usual (see JSON payload above) and the suggestion fence must contain exactly one line (the full replacement for that line).
-
-For a **multi-line** fix, add `start_line` to the JSON payload (in addition to `line`, which becomes the end of the range) so the range being replaced is unambiguous:
-```json
-{
-  "body": "[PATTERN] ...\n\n```suggestion\n<replacement for the whole range>\n```",
-  "path": "<path/to/file>",
-  "start_line": 38,
-  "line": 42,
-  "commit_id": "$SHA",
-  "side": "RIGHT",
-  "start_side": "RIGHT"
-}
-```
-The suggestion fence must contain the **complete replacement for the entire `start_line..line` range**, not just the changed portion — GitHub replaces the whole commented range with the fence content.
-
-**When NOT to use `suggestion`:** architectural/pattern changes that touch multiple files, migrations that need manual judgment (e.g. backfill strategy, data volume considerations), renames that require consistency checks elsewhere in the codebase, or anything where auto-applying without further thought could introduce a new inconsistency. In those cases keep the code example as a plain fenced block (no `suggestion` tag) — informative, not one-click-appliable — as before.
-
-#### Option C: Post a review with approval or request changes
-```bash
-gh pr review "$PR" --repo "$REPO" --approve --body "<message>"
-gh pr review "$PR" --repo "$REPO" --request-changes --body "<message>"
-```
+**CI mode:** consider running `post_review.sh` with `POST_REVIEW_DISABLE_INLINE=true` to skip inline comments entirely if you only want the general summary (reduces API calls and CI time).
 
 ### 7. Cleanup
 
@@ -236,8 +172,9 @@ for f in "$WORKDIR/meta.json" \
          "$WORKDIR/clickup_summary.txt" \
          "$WORKDIR/context.env" \
          "$WORKDIR/summary.md" \
-         "$WORKDIR/findings.jsonl" \
-         "$WORKDIR/inline_comment.json"; do
+         "$WORKDIR/summary_simple.md" \
+         "$WORKDIR/summary_fallbacks.md" \
+         "$WORKDIR/findings.jsonl"; do
   [ -f "$f" ] && echo "" > "$f"
 done
 ```
@@ -405,12 +342,12 @@ Guía por tipo de hallazgo:
 - If the diff is large (>1000 lines), prioritize the files most likely to carry risk for *this* repo — infer from what actually changed and from which loaded instruction files flagged them as sensitive (e.g. auth/security-related code, data access/migration files, public API contracts, infra state) rather than assuming a fixed backend layer like "services/controllers". Explicitly state which files were skipped and why.
 - If information is missing, state the limitation instead of guessing.
 - Limit every tool call to a maximum of **2 attempts**. On the first failure, print the full output/error and explain why. If it fails a second time, skip it and continue — never retry a third time with a variation.
-- Inline comments: max **2 attempts per finding** (see Option B). After that, fall back to a general comment and move on.
+- Inline comments: max **2 attempts per finding** (handled by `post_review.sh`). After that, fall back to a general comment and move on.
 - ClickUp ticket fetch: max **2 attempts**. After that, note the failure and proceed without ClickUp context.
 - **CI mode never blocks on a question.** If at any point the instructions below seem to require waiting for a human, prefer the CI-mode default (see `MODE=` from step 1) over stalling.
 - Global budget: if you notice you are repeating the same class of action (e.g. retrying inline comments) more than ~5 times across the whole run, stop attempting inline comments entirely, note it in the summary comment, and finish.
 - **Never make one `Bash` tool call per finding to build `findings.jsonl`** (or for any similarly repetitive bookkeeping) — batch it into a single call once analysis is done. Turns are a hard budget; spending them one-per-finding on a large PR can exhaust it before step 6 (posting) is ever reached, which means *no* comment gets posted at all, not even the general summary.
-- **Post the general summary (step 6, Option A) before attempting any inline comments (Option B).** If turns run short, a posted summary with no inline comments is still a successful run.
+- **`post_review.sh` always posts the general summary before attempting inline comments.** If turns run short, a posted summary with no inline comments is still a successful run.
 - **Always run step 7 (cleanup)** before ending, regardless of how the run went — emptying the working files is not optional, even on early exit/error paths.
 - **Step 1 (`scripts/prefetch.sh`) is mandatory and must always run first**, before anything else, in every mode. Never hand-derive `REPO`/`PR`/`WORKDIR`/`SHA`/`TICKET_ID` yourself — the script is the single source of truth and is idempotent, so there is no cost to running it again if you're ever unsure. Guessing or recomputing any of these values by hand is exactly the failure mode this script exists to eliminate.
 
