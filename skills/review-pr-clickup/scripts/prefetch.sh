@@ -19,12 +19,19 @@
 # Env fallback (used when the matching flag is not passed):
 #   REPO or GITHUB_REPOSITORY   owner/repo
 #   PR or PR_NUMBER             PR number
+#   REPO_ROOT                   absolute path to the checked-out repo (defaults
+#                               to $PWD -- the repo is already cloned by the
+#                               time this runs, we never clone/copy it again)
 #   CLICKUP_TOKEN               ClickUp API token (optional)
 #   CLICKUP_TEAM_ID             ClickUp team id (optional)
 #   CI                          "true" selects CI semantics for the dirty-tree guard
 #
 # Output: a final key=value block on stdout (MODE, REPO, PR, WORKDIR, SHA,
-# TICKET_ID, CLICKUP_STATUS), also persisted to "$WORKDIR/context.env".
+# TICKET_ID, CLICKUP_STATUS, REPO_ROOT), also persisted to "$WORKDIR/context.env".
+# REPO_ROOT is the authoritative absolute path for any later filesystem read
+# of the repo itself (e.g. .github/instructions/) -- always use it instead of
+# a bare relative path, since the caller's cwd at that later point isn't
+# guaranteed to still be the repo root.
 
 set -uo pipefail
 
@@ -67,6 +74,8 @@ if [ -z "$REPO" ] || [ -z "$PR" ]; then
   exit 1
 fi
 
+REPO_ROOT="${REPO_ROOT:-$PWD}"
+
 REPO_SAFE=$(echo "$REPO" | tr '/' '_')
 WORKDIR="/tmp/pr_review/${REPO_SAFE}/${PR}"
 mkdir -p "$WORKDIR"
@@ -82,9 +91,11 @@ if [ "${CI:-}" = "true" ]; then
 fi
 
 # --- step 2: dirty working tree guard -------------------------------------
+# `git -C "$REPO_ROOT"` instead of a bare `git status` -- never depend on the
+# caller's cwd happening to be the repo root.
 # Ignore changes to files the skill itself might touch across runs.
 IGNORED_FILES='SKILL.md|AGENTS.md|Taskfile.yml|OPENCODE_SETUP.md'
-DIRTY=$(git status --porcelain 2>/dev/null | grep -Ev "($IGNORED_FILES)\$" || true)
+DIRTY=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null | grep -Ev "($IGNORED_FILES)\$" || true)
 if [ -n "$DIRTY" ] && [ "$FORCE" != true ]; then
   if [ "$MODE" = "CI" ]; then
     echo "[FATAL] Working tree is dirty in CI mode (should be a fresh checkout):" >&2
@@ -163,4 +174,5 @@ fi
   echo "SHA=$SHA"
   echo "TICKET_ID=$TICKET_ID"
   echo "CLICKUP_STATUS=$CLICKUP_STATUS"
+  echo "REPO_ROOT=$REPO_ROOT"
 } | tee "$WORKDIR/context.env"

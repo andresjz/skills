@@ -3,7 +3,7 @@ name: review-pr-clickup
 description: Revisa un PR de GitHub con contexto de ticket ClickUp - analiza cambios contra requisitos y criterios de aceptación del ticket
 compatibility: Requiere gh CLI (autenticado), git, jq, clickup-cli (con CLICKUP_TOKEN y CLICKUP_TEAM_ID). El directorio .github/instructions/ debe existir en el repo objetivo.
 metadata:
-  version: "1.2.0"
+  version: "1.0.3"
 ---
 
 # Review Pull Request con Contexto ClickUp
@@ -32,9 +32,12 @@ WORKDIR=/tmp/pr_review/owner_repo/123
 SHA=<head-commit-sha>
 TICKET_ID=CU-xxxxxxxx (or empty)
 CLICKUP_STATUS=fetched|skipped|error|no_ticket
+REPO_ROOT=/absolute/path/to/checked-out/repo
 ```
 
 Use these values as authoritative — never recompute `WORKDIR` by hand, never re-derive `REPO`/`PR` from context, never guess `SHA`. If you need any of them again later in the run, either keep them from this output or re-run `--print-workdir-only` to recover `WORKDIR` and read the rest from `$WORKDIR/context.env`.
+
+**`REPO_ROOT` is the absolute path to the already-checked-out repo — the repo is never cloned or copied again by this skill.** Whenever you need to read a file that lives in the repo itself (not a fetched artifact under `WORKDIR`) — e.g. `.github/instructions/`, or any source file — always prefix the path with `$REPO_ROOT` (e.g. `"$REPO_ROOT/.github/instructions"`). Never use a bare relative path for this: your shell's cwd at that point in the run is not guaranteed to still be the repo root (you may have `cd`ed into `$WORKDIR` earlier to inspect a fetched file), and that ambiguity is exactly what caused instruction files to go undetected in a real run despite being present in the repo.
 
 **Exit codes to handle:**
 - `0`: success, proceed to step 4.
@@ -64,10 +67,14 @@ Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `
 This skill must work on any repo/language/framework. Never hardcode filenames like `java.instructions.md` or `controllers.instructions.md` — discover what actually exists and decide relevance dynamically.
 
 ```bash
-ls .github/instructions/*.instructions.md 2>/dev/null
+ls "$REPO_ROOT/.github/instructions"/*.md 2>/dev/null
 ```
 
-For each `*.instructions.md` file found, determine whether it applies to this PR:
+**Always anchor this to `$REPO_ROOT` (from step 1's output), never a bare relative path** — see the note on `REPO_ROOT` in step 1.
+
+**Do not restrict this to `*.instructions.md` only.** Some repos name their instruction files plainly (e.g. `coding-standards.md`, `security.md`) without the `.instructions.md` suffix or any frontmatter — those are still valid instruction files and must be discovered too. If the glob above returns nothing, that means the directory has no `.md` files at all (or doesn't exist) — don't assume "no instructions" without having actually run it.
+
+For each `*.md` file found, determine whether it applies to this PR:
 
 **Tier 1 — frontmatter `applyTo` (preferred, matches GitHub's Copilot custom-instructions convention):**
 Read the YAML frontmatter at the top of the file (between `---` lines). If it has an `applyTo` key with one or more glob patterns (e.g. `applyTo: "**/*.java"` or `applyTo: "**/*Controller.java,**/*Controller.kt"`), match every path in `$WORKDIR/files.txt` against those globs.
@@ -75,8 +82,11 @@ Read the YAML frontmatter at the top of the file (between `---` lines). If it ha
 - No match on any changed file → skip this instruction file entirely (don't load its content, don't mention it).
 - A file with `applyTo` absent, empty, or set to `**` / `*` → treat as **always applicable** (general/repo-wide guidance, e.g. `general.instructions.md`).
 
-**Tier 2 — filename-keyword fallback (only if the repo's instruction files have no frontmatter):**
-Strip `.instructions.md` from the filename to get a keyword (e.g. `services`, `migrations`, `frontend`). Include the file if that keyword (singular or plural, case-insensitive) appears in the path of at least one modified file. Always include any file literally named `general.instructions.md` (or equivalent, e.g. `default`, `common`).
+**Tier 2 — filename-keyword fallback (only if the file has no frontmatter, or no `applyTo` key):**
+Strip the extension (`.md` or `.instructions.md`) from the filename to get a keyword.
+- If the keyword names a specific technology/module/layer (e.g. `services`, `migrations`, `frontend`, `terraform`), include the file only if that keyword (singular or plural, case-insensitive) appears in the path of at least one modified file.
+- If the keyword instead names general, stack-agnostic engineering practice — e.g. `general`, `default`, `common`, `coding-standards`, `standards`, `guidelines`, `conventions`, `style`, `security`, `commits` — treat it as **always applicable**, same as an explicit `applyTo: "**"`. Read the first few lines of the file if the filename alone is ambiguous: content that states rules "toda PR debe cumplir" / "every PR must follow" (i.e. project-wide, not tied to one file type) is general guidance regardless of its exact filename.
+- When genuinely unsure whether a no-frontmatter file is general or scoped, prefer including it — a false positive here only adds an extra guideline check; a false negative silently drops real project standards from the review, which is the worse failure.
 
 Load only the instruction files that matched. State in the review draft which instruction files were considered relevant and why (one line is enough), so the mapping is auditable per repo instead of assumed.
 
@@ -98,6 +108,7 @@ If `$WORKDIR/clickup_summary.txt` exists and contains ticket data:
 - Verify that validation logic matches what the ticket describes (e.g., case-insensitive email validation)
 
 **You may read files outside the diff, in a bounded way, to check for patterns and duplicate code.** The original guard against browsing the repo was too strict — some findings (e.g. "this duplicates logic already in `X`", "this doesn't follow the pattern used in `Y`") genuinely need to see another file to be correct instead of speculative. Rules to keep this bounded (see also Anti-loop guards):
+- Always resolve these paths from `$REPO_ROOT` (e.g. `"$REPO_ROOT/src/..."`), same as instruction files in step 4 — never a bare relative path.
 - Only read a file outside the diff when it materially changes a specific finding — not for general exploration.
 - Prefer a targeted `grep`/`find` for a function/class name over browsing directories.
 - Cap it at roughly 5 extra file reads per review. If you need more than that, the finding probably isn't worth chasing further — state the suspicion in the review as a question for the author instead of confirming it exhaustively.
