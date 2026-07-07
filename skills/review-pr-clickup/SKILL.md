@@ -3,7 +3,7 @@ name: review-pr-clickup
 description: Revisa un PR de GitHub con contexto de ticket ClickUp - analiza cambios contra requisitos y criterios de aceptación del ticket
 compatibility: Requiere gh CLI (autenticado), git, jq, clickup-cli (con CLICKUP_TOKEN y CLICKUP_TEAM_ID). El directorio .github/instructions/ debe existir en el repo objetivo.
 metadata:
-  version: "1.0.3"
+  version: "1.0.5"
 ---
 
 # Review Pull Request con Contexto ClickUp
@@ -122,12 +122,20 @@ If `$WORKDIR/clickup_summary.txt` exists and contains ticket data:
 
 **CI mode**: skip this. Go straight to step 6.
 
-**Prepare inline-comment candidates as you go, not afterward.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), append one line to `$WORKDIR/findings.jsonl` **right when you identify it** — while you're still looking at that exact diff hunk, not later when generating the final summary. This matters because determining the correct `line` (the line number in the new file, not just a position inside the diff) is far more reliable while the hunk header (`@@ -old_start,old_count +new_start,new_count @@`) and its lines are directly in front of you than if you try to reconstruct it afterward from memory. If the diff line is ambiguous (e.g. a duplicated snippet), confirm the exact line by locating it in `"$REPO_ROOT/<path>"` (`grep -n` or equivalent) instead of guessing.
+**Prepare inline-comment candidates as you go, not afterward.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), append one line to `$WORKDIR/findings.jsonl` **right when you identify it** — while you're still looking at that exact diff hunk, not later when generating the final summary.
+
+**Never use the line-number gutter shown when you `Read` `diff.txt` as the `line` value.** `diff.txt` is one large file concatenating every changed file's diff — the numbers the `Read` tool shows you (e.g. `847\t+  <AppMenu>`) are `diff.txt`'s own line numbers, completely unrelated to the target file's real line numbers. Using them directly is the single most common cause of `"could not be resolved"` errors: it can coincidentally work for the first file near the top of the diff (small offset) and will reliably fail for every file further down (the offset only grows). Do not treat this as an edge case — it happens on every multi-file PR.
+
+**Always determine the real line number by locating the code in the actual file, not by counting inside the diff** (works the same regardless of language/stack — Java, Python, TypeScript, Go, etc.):
+```bash
+grep -n -F "<distinctive snippet from the exact line, e.g. a function/method call, string literal, or variable assignment>" "$REPO_ROOT/<path/to/file>"
+```
+Use a distinctive substring from the exact line you're commenting on (the more unique, the better — avoid single common tokens like `}` or `);` or `pass` that repeat throughout any file in any language). This gives you the file's real line number directly, with zero risk of confusing it with `diff.txt`'s own numbering. Only fall back to manually counting from the hunk header (`@@ -old_start,old_count +new_start,new_count @@`) if `grep` can't uniquely locate the line (e.g. the snippet repeats in the file) — and if you do, double-check the result against `grep -c` for that same snippet to catch duplicates.
 
 Append with a single JSON object per line (JSONL), one `cat >>` per finding:
 ```bash
 cat >> "$WORKDIR/findings.jsonl" << EOF
-{"path": "src/main/java/.../File.java", "line": 42, "start_line": null, "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
+{"path": "<path/to/file>", "line": 42, "start_line": null, "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
 EOF
 ```
 By the time you reach step 6, `findings.jsonl` already has every inline-comment candidate fully resolved (path + line + body) — step 6 just executes them, it does not re-derive anything.
@@ -175,6 +183,7 @@ GitHub renders a fenced ```` ```suggestion ```` code block inside an inline PR c
 
 The body of the comment is: a short explanation, then a suggestion fence containing **only** the corrected code that should replace the commented line(s) — nothing else inside the fence (no comments-about-the-code, no partial line).
 
+**Illustrative example (write the suggestion in whatever language the file actually is — Java below, but the same principle applies to Python, TypeScript, Go, etc.):**
 ```
 [BUG] `user` puede ser null aquí si el lookup falla; agrega el check antes de usarlo.
 
@@ -191,7 +200,7 @@ For a **multi-line** fix, add `start_line` to the JSON payload (in addition to `
 ```json
 {
   "body": "[PATTERN] ...\n\n```suggestion\n<replacement for the whole range>\n```",
-  "path": "src/.../File.java",
+  "path": "<path/to/file>",
   "start_line": 38,
   "line": 42,
   "commit_id": "$SHA",
