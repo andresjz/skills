@@ -60,7 +60,7 @@ Use these values as authoritative — never recompute `WORKDIR` by hand, never r
 
 ## Required workflow
 
-Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `context.env`, `summary.md`, `inline_comment.json`) lives under the `WORKDIR` printed by `scripts/prefetch.sh` in step 1 above — never under a different or hand-computed path.
+Every temp file referenced from here on (`meta.json`, `diff.txt`, `files.txt`, `head_sha.txt`, `comments.json`, `inline_comments.json`, `clickup_tickets.txt`, `clickup_summary.txt`, `context.env`, `summary.md`, `findings.jsonl`, `inline_comment.json`) lives under the `WORKDIR` printed by `scripts/prefetch.sh` in step 1 above — never under a different or hand-computed path.
 
 ### 4. Discover and load only relevant instructions (repo-agnostic)
 
@@ -122,6 +122,16 @@ If `$WORKDIR/clickup_summary.txt` exists and contains ticket data:
 
 **CI mode**: skip this. Go straight to step 6.
 
+**Prepare inline-comment candidates as you go, not afterward.** For every finding that qualifies for an inline comment (see the tag guide in "Writing actionable comments"), append one line to `$WORKDIR/findings.jsonl` **right when you identify it** — while you're still looking at that exact diff hunk, not later when generating the final summary. This matters because determining the correct `line` (the line number in the new file, not just a position inside the diff) is far more reliable while the hunk header (`@@ -old_start,old_count +new_start,new_count @@`) and its lines are directly in front of you than if you try to reconstruct it afterward from memory. If the diff line is ambiguous (e.g. a duplicated snippet), confirm the exact line by locating it in `"$REPO_ROOT/<path>"` (`grep -n` or equivalent) instead of guessing.
+
+Append with a single JSON object per line (JSONL), one `cat >>` per finding:
+```bash
+cat >> "$WORKDIR/findings.jsonl" << EOF
+{"path": "src/main/java/.../File.java", "line": 42, "start_line": null, "tag": "BUG", "body": "[BUG] full comment body here, including any suggestion fence"}
+EOF
+```
+By the time you reach step 6, `findings.jsonl` already has every inline-comment candidate fully resolved (path + line + body) — step 6 just executes them, it does not re-derive anything.
+
 ### 6. Post the review
 
 **CI mode**: post automatically, no confirmation needed. **Interactive mode**: only after user confirmation.
@@ -137,29 +147,27 @@ gh pr comment "$PR" --repo "$REPO" --body-file "$WORKDIR/summary.md"
 
 #### Option B: Post inline comments on specific lines (for critical findings)
 
+**This step only executes what step 5 already prepared in `$WORKDIR/findings.jsonl` — it does not decide line numbers itself.** Each line of that file already has `path`/`line`/`body` resolved; here you just add `commit_id`/`side` (the only fields that are the same for every entry, so there's no point storing them per-line) and post.
+
 Use temp JSON files, not process substitution (`<(...)`) — process substitution is not supported by `sh`/`dash` and silently fails on some CI runners, which is a likely source of retry loops:
 
 ```bash
 SHA=$(cat "$WORKDIR/head_sha.txt")
 
-cat > "$WORKDIR/inline_comment.json" << EOF
-{
-  "body": "[TAG] Comment text here",
-  "path": "src/main/java/.../File.java",
-  "line": 42,
-  "commit_id": "$SHA",
-  "side": "RIGHT"
-}
-EOF
+while IFS= read -r finding; do
+  [ -z "$finding" ] && continue
+  jq --arg sha "$SHA" '. + {commit_id: $sha, side: "RIGHT"}' <<< "$finding" \
+    > "$WORKDIR/inline_comment.json"
 
-gh api \
-  --method POST \
-  -H "Accept: application/vnd.github.v3+json" \
-  "/repos/$REPO/pulls/$PR/comments" \
-  --input "$WORKDIR/inline_comment.json"
+  gh api \
+    --method POST \
+    -H "Accept: application/vnd.github.v3+json" \
+    "/repos/$REPO/pulls/$PR/comments" \
+    --input "$WORKDIR/inline_comment.json"
+done < "$WORKDIR/findings.jsonl"
 ```
 
-**Hard rule to prevent loops:** for a given finding, attempt an inline comment **at most twice** (e.g. the diff line, then one nearby line inside the same hunk if the first is rejected with "could not be resolved"). If both attempts fail, **do not keep guessing lines** — immediately fall back to including that finding in the Option A general PR comment instead, tagged with the file/line in text, and move on to the next finding.
+**Hard rule to prevent loops:** for a given finding, attempt an inline comment **at most twice** (e.g. the line from `findings.jsonl`, then one nearby line inside the same hunk if the first is rejected with "could not be resolved"). If both attempts fail, **do not keep guessing lines** — immediately fall back to including that finding in the Option A general PR comment instead, tagged with the file/line in text, and move on to the next finding.
 
 ##### Using `suggestion` blocks (one-click auto-apply)
 
@@ -216,6 +224,7 @@ for f in "$WORKDIR/meta.json" \
          "$WORKDIR/clickup_summary.txt" \
          "$WORKDIR/context.env" \
          "$WORKDIR/summary.md" \
+         "$WORKDIR/findings.jsonl" \
          "$WORKDIR/inline_comment.json"; do
   [ -f "$f" ] && echo "" > "$f"
 done
